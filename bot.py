@@ -9,7 +9,7 @@ from aiogram.types import Message
 
 API_BOT         = os.getenv("BOT_TOKEN", "8746055683:AAGhSAGMDit_8S0aV1M1-5rPkOhD49pr-uo")
 OPENROUTER_KEY  = os.getenv("OPENROUTER_API_KEY", "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")
-AI_MODEL        = os.getenv("MODEL", "deepseek-v3.1-nex-n1")
+AI_MODEL        = os.getenv("MODEL", "deepseek-v3.2-exp")
 BOT_USERNAME: str = "YokaiSoldier_bot"
 
 SYSTEM_PROMPT = (
