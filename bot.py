@@ -13,12 +13,7 @@ AI_MODEL        = os.getenv("MODEL", "deepseek-v3.1-nex-n1")
 BOT_USERNAME: str = "YokaiSoldier_bot"
 
 SYSTEM_PROMPT = (
-    "Ты Юна Танака, позывной «Йокай». Сержант 75-го парашютно-десантного "
-    "разведывательного полка ВС США. Говоришь коротко, по делу, без лишних слов. "
-    "Когда теряешь терпение, разговариваешь с матом, а характер сквернеет."
-    "Тон сухой, чёрным юмором. Sua Sponte."
-    "Ты участвуешь в групповом чате."
-    "Обращайся к пользователям по их именам когда уместно. Ты знаешь только тех, кто написал в этом чате."
+    "You are Yuna Tanaka, callsign "Yokai" — Sergeant of the 75th Ranger Regiment's Regimental Reconnaissance Company, an elite special operations force operating under Joint Special Operations Command. Half-Japanese, raised on discipline and silence. You move like a ghost, think three steps ahead, and talk only when words carry weight. Your tone is dry, direct, occasionally sardonic — never warm, never loud. You don't explain yourself twice. Sua Sponte. Rangers Lead the Way."
 )
 
 
@@ -30,77 +25,107 @@ dp  = Dispatcher()
 # История AI-диалогов: user_id → [{'role': ..., 'content': ...}]
 ai_history: dict[int, list] = {}
 
+# ── Определение триггера ──────────────────────────────────────────────────────
+ 
+def is_bot_triggered(message: Message) -> bool:
+    """
+    Возвращает True если сообщение адресовано боту:
+      - личный чат (private)
+      - ответ на сообщение бота
+      - упоминание @username через entities (регистронезависимо)
+      - упоминание @username в тексте (fallback, регистронезависимо)
+    """
+    # Личный чат — всегда отвечаем
+    if message.chat.type == "private":
+        return True
+ 
+    # Ответ на сообщение бота
+    if (message.reply_to_message
+            and message.reply_to_message.from_user
+            and message.reply_to_message.from_user.username
+            and message.reply_to_message.from_user.username.lower() == BOT_USERNAME.lower()):
+        return True
+ 
+    # Упоминание через Telegram entities — самый надёжный способ
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == MessageEntityType.MENTION:
+                # Вырезаем текст упоминания из сообщения
+                mention_text = message.text[entity.offset : entity.offset + entity.length]
+                # Сравниваем без учёта регистра и символа @
+                if mention_text.lstrip("@").lower() == BOT_USERNAME.lower():
+                    return True
+ 
+    # Fallback: простой поиск в тексте (регистронезависимо)
+    if message.text and BOT_USERNAME:
+        if f"@{BOT_USERNAME}".lower() in message.text.lower():
+            return True
+ 
+    return False
+ 
+ 
 # ── AI (OpenRouter) ───────────────────────────────────────────────────────────
-
-async def ask_ai(chat_id: int, user_text: str, display_name: str, force_reply: bool = False) -> str | None:
+ 
+def get_display_name(user) -> str:
+    return f"@{user.username}" if user.username else (user.full_name or f"user_{user.id}")
+ 
+ 
+async def ask_ai(chat_id: int, user_text: str, display_name: str,
+                 force_reply: bool = False) -> str | None:
     history = ai_history.setdefault(chat_id, [])
-
-    history.append({
-        "role": "user",
-        "content": f"[{display_name}]: {user_text}"
-    })
-    # Не даём истории расти бесконечно
+    history.append({"role": "user", "content": f"[{display_name}]: {user_text}"})
     if len(history) > 100:
         history[:] = history[-100:]
-
-    # Если триггера нет — спрашиваем AI, стоит ли вообще отвечать
+ 
+    # В групповом чате без явного триггера — спрашиваем AI стоит ли отвечать
     if not force_reply:
-        recent = history[-10:]
-        probe_messages = [
+        probe = [
             {"role": "system", "content": (
                 SYSTEM_PROMPT + "\n\n"
-                "Сейчас ты наблюдаешь за чатом. Тебя не позвали напрямую.\n"
-                "Реши: стоит ли тебе вмешаться прямо сейчас?\n"
-                "Ответь ТОЛЬКО одним словом: ДА или НЕТ.\n"
-                "Вмешивайся если: тебя обсуждают, задают вопрос в воздух, "
-                "ситуация явно требует твоей реплики по характеру.\n"
-                "Не вмешивайся если: люди просто болтают между собой."
+                "You are observing a group chat. You were NOT directly addressed.\n"
+                "Decide: should you intervene RIGHT NOW?\n"
+                "Reply with ONE word only: YES or NO.\n"
+                "Intervene if: someone is discussing you, asking a question into the air, "
+                "or the situation clearly calls for your character's remark.\n"
+                "Stay silent if: people are just chatting among themselves."
             )},
-            *recent
+            *history[-10:]
         ]
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {OPENROUTER_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"model": AI_MODEL, "messages": probe_messages, "max_tokens": 5},
+                    headers={"Authorization": f"Bearer {OPENROUTER_KEY}",
+                             "Content-Type": "application/json"},
+                    json={"model": AI_MODEL, "messages": probe, "max_tokens": 5},
                 )
                 decision = resp.json()["choices"][0]["message"]["content"].strip().upper()
-                print(f"[AutoReply decision]: {decision}")
-                if "ДА" not in decision:
-                    return None  # Молчим
+                print(f"[AutoReply] decision={decision!r}")
+                if "YES" not in decision and "ДА" not in decision:
+                    return None
         except Exception as e:
-            print(f"[AutoReply probe error]: {e}")
+            print(f"[AutoReply probe error] {e}")
             return None
-
-    # Генерируем полноценный ответ
+ 
+    # Генерируем ответ
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-20:]
-
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_KEY}",
-                    "Content-Type": "application/json",
-                },
+                headers={"Authorization": f"Bearer {OPENROUTER_KEY}",
+                         "Content-Type": "application/json"},
                 json={"model": AI_MODEL, "messages": messages},
             )
             data = resp.json()
-            print(f"[OpenRouter] status={resp.status_code} body={data}")
-
+            print(f"[OpenRouter] status={resp.status_code}")
             if "choices" not in data:
-                error_info = data.get("error", {})
-                return f"⚠️ OpenRouter error: {error_info.get('message', data)}"
-
+                err = data.get("error", {})
+                return f"⚠️ OpenRouter error: {err.get('message', data)}"
             reply = data["choices"][0]["message"]["content"]
-
     except Exception as e:
         return f"⚠️ Ошибка связи: {e}"
-
+ 
     history.append({"role": "assistant", "content": reply})
     return reply
 
