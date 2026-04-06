@@ -22,7 +22,9 @@ SYSTEM_PROMPT = (
 bot = Bot(token=API_BOT)
 dp  = Dispatcher()
 
-# История AI-диалогов: user_id → [{'role': ..., 'content': ...}]
+# История AI-диалогов: 
+
+user_id → [{'role': ..., 'content': ...}]
 ai_history: dict[int, list] = {}
 
 # ── AI (OpenRouter) ───────────────────────────────────────────────────────────
