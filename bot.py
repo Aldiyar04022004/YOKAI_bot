@@ -1,7 +1,3 @@
-"""
-Сержант Йокай — Telegram-бот на OpenRouter AI
-"""
-
 import asyncio
 import httpx
 import os
