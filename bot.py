@@ -25,107 +25,77 @@ dp  = Dispatcher()
 # История AI-диалогов: user_id → [{'role': ..., 'content': ...}]
 ai_history: dict[int, list] = {}
 
-# ── Определение триггера ──────────────────────────────────────────────────────
- 
-def is_bot_triggered(message: Message) -> bool:
-    """
-    Возвращает True если сообщение адресовано боту:
-      - личный чат (private)
-      - ответ на сообщение бота
-      - упоминание @username через entities (регистронезависимо)
-      - упоминание @username в тексте (fallback, регистронезависимо)
-    """
-    # Личный чат — всегда отвечаем
-    if message.chat.type == "private":
-        return True
- 
-    # Ответ на сообщение бота
-    if (message.reply_to_message
-            and message.reply_to_message.from_user
-            and message.reply_to_message.from_user.username
-            and message.reply_to_message.from_user.username.lower() == BOT_USERNAME.lower()):
-        return True
- 
-    # Упоминание через Telegram entities — самый надёжный способ
-    if message.entities:
-        for entity in message.entities:
-            if entity.type == MessageEntityType.MENTION:
-                # Вырезаем текст упоминания из сообщения
-                mention_text = message.text[entity.offset : entity.offset + entity.length]
-                # Сравниваем без учёта регистра и символа @
-                if mention_text.lstrip("@").lower() == BOT_USERNAME.lower():
-                    return True
- 
-    # Fallback: простой поиск в тексте (регистронезависимо)
-    if message.text and BOT_USERNAME:
-        if f"@{BOT_USERNAME}".lower() in message.text.lower():
-            return True
- 
-    return False
- 
- 
 # ── AI (OpenRouter) ───────────────────────────────────────────────────────────
- 
-def get_display_name(user) -> str:
-    return f"@{user.username}" if user.username else (user.full_name or f"user_{user.id}")
- 
- 
-async def ask_ai(chat_id: int, user_text: str, display_name: str,
-                 force_reply: bool = False) -> str | None:
+
+async def ask_ai(chat_id: int, user_text: str, display_name: str, force_reply: bool = False) -> str | None:
     history = ai_history.setdefault(chat_id, [])
-    history.append({"role": "user", "content": f"[{display_name}]: {user_text}"})
+
+    history.append({
+        "role": "user",
+        "content": f"[{display_name}]: {user_text}"
+    })
+    # Не даём истории расти бесконечно
     if len(history) > 100:
         history[:] = history[-100:]
- 
-    # В групповом чате без явного триггера — спрашиваем AI стоит ли отвечать
+
+    # Если триггера нет — спрашиваем AI, стоит ли вообще отвечать
     if not force_reply:
-        probe = [
+        recent = history[-10:]
+        probe_messages = [
             {"role": "system", "content": (
                 SYSTEM_PROMPT + "\n\n"
-                "You are observing a group chat. You were NOT directly addressed.\n"
-                "Decide: should you intervene RIGHT NOW?\n"
-                "Reply with ONE word only: YES or NO.\n"
-                "Intervene if: someone is discussing you, asking a question into the air, "
-                "or the situation clearly calls for your character's remark.\n"
-                "Stay silent if: people are just chatting among themselves."
+                "Сейчас ты наблюдаешь за чатом. Тебя не позвали напрямую.\n"
+                "Реши: стоит ли тебе вмешаться прямо сейчас?\n"
+                "Ответь ТОЛЬКО одним словом: ДА или НЕТ.\n"
+                "Вмешивайся если: тебя обсуждают, задают вопрос в воздух, "
+                "ситуация явно требует твоей реплики по характеру.\n"
+                "Не вмешивайся если: люди просто болтают между собой."
             )},
-            *history[-10:]
+            *recent
         ]
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {OPENROUTER_KEY}",
-                             "Content-Type": "application/json"},
-                    json={"model": AI_MODEL, "messages": probe, "max_tokens": 5},
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"model": AI_MODEL, "messages": probe_messages, "max_tokens": 5},
                 )
                 decision = resp.json()["choices"][0]["message"]["content"].strip().upper()
-                print(f"[AutoReply] decision={decision!r}")
-                if "YES" not in decision and "ДА" not in decision:
-                    return None
+                print(f"[AutoReply decision]: {decision}")
+                if "ДА" not in decision:
+                    return None  # Молчим
         except Exception as e:
-            print(f"[AutoReply probe error] {e}")
+            print(f"[AutoReply probe error]: {e}")
             return None
- 
-    # Генерируем ответ
+
+    # Генерируем полноценный ответ
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-20:]
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENROUTER_KEY}",
-                         "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_KEY}",
+                    "Content-Type": "application/json",
+                },
                 json={"model": AI_MODEL, "messages": messages},
             )
             data = resp.json()
-            print(f"[OpenRouter] status={resp.status_code}")
+            print(f"[OpenRouter] status={resp.status_code} body={data}")
+
             if "choices" not in data:
-                err = data.get("error", {})
-                return f"⚠️ OpenRouter error: {err.get('message', data)}"
+                error_info = data.get("error", {})
+                return f"⚠️ OpenRouter error: {error_info.get('message', data)}"
+
             reply = data["choices"][0]["message"]["content"]
+
     except Exception as e:
         return f"⚠️ Ошибка связи: {e}"
- 
+
     history.append({"role": "assistant", "content": reply})
     return reply
 
